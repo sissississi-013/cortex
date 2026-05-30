@@ -101,7 +101,7 @@ Does the fusiform face area respond more to faces than houses?
 
 The dashboard shows the full workflow: experiment design, generated stimuli, cortical maps, live logs, statistical decisions, and final report.
 
-<img width="869" height="1024" alt="image" src="https://github.com/user-attachments/assets/3034d9ef-dcf9-462a-b76b-71435fe2aabf" />
+<img width="1928" height="3134" alt="image" src="https://github.com/user-attachments/assets/43c411f4-aa4a-4a37-af29-99d7ed46d9e1" />
 
 ## MCP Tools
 
