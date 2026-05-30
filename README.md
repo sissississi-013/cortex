@@ -10,9 +10,7 @@ It also ships as an MCP server, so other agents can call the same neuroscience t
 
 Built at the Autoresearch Systems Hackathon on May 30, 2026 with Modal, OpenAI, Raindrop, and Antler.
 
-<p align="center">
-  <img src="assets/cortex-full-demo.png" alt="Cortex full demo workflow" width="900">
-</p>
+
 
 ## Why Cortex
 
@@ -103,9 +101,7 @@ Does the fusiform face area respond more to faces than houses?
 
 The dashboard shows the full workflow: experiment design, generated stimuli, cortical maps, live logs, statistical decisions, and final report.
 
-<p align="center">
-  <img src="assets/cortex-research-loop.png" alt="Cortex research loop detail" width="900">
-</p>
+<img width="869" height="1024" alt="image" src="https://github.com/user-attachments/assets/3034d9ef-dcf9-462a-b76b-71435fe2aabf" />
 
 ## MCP Tools
 
