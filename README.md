@@ -4,9 +4,17 @@
   <img src="assets/cortex-logo.png" alt="Cortex logo" width="220">
 </p>
 
-Cortex is an autonomous neuroscience research agent that can design experiments, generate stimuli, run brain tools, and revise hypotheses from real evidence.
+<p align="center">
+  <a href="https://www.python.org"><img alt="Python 3.12+" src="https://img.shields.io/badge/Python-3.12%2B-3776AB?style=flat-square&logo=python&logoColor=white"></a>
+  <a href="https://modelcontextprotocol.io"><img alt="MCP Server" src="https://img.shields.io/badge/MCP-Server-111111?style=flat-square"></a>
+  <a href="https://openai.github.io/openai-agents-python/"><img alt="OpenAI Agents SDK" src="https://img.shields.io/badge/OpenAI-Agents_SDK-111111?style=flat-square"></a>
+  <a href="https://modal.com"><img alt="Modal GPU" src="https://img.shields.io/badge/Modal-GPU-7C3AED?style=flat-square"></a>
+  <a href="https://www.raindrop.ai"><img alt="Raindrop Tracing" src="https://img.shields.io/badge/Raindrop-Tracing-4ADE80?style=flat-square"></a>
+</p>
 
-It also ships as an MCP server, so other agents can call the same neuroscience tools directly from Cursor, Claude Code, Codex, or any MCP-compatible client.
+Cortex closes the loop between hypothesis generation, stimulus design, brain simulation, and evidence accumulation.
+
+It is an autonomous neuroscience research agent that can generate a testable claim, create stimuli, run brain tools, evaluate the result, and decide whether to keep, refine, or discard the hypothesis.
 
 Built at the Autoresearch Systems Hackathon on May 30, 2026 with Modal, OpenAI, Raindrop, and Antler.
 
@@ -14,7 +22,9 @@ Built at the Autoresearch Systems Hackathon on May 30, 2026 with Modal, OpenAI, 
 
 ## Why Cortex
 
-Most research agents can search papers and write summaries. Cortex adds a brain-data loop:
+Autoresearch is not just an agent editing code until validation loss improves. The deeper pattern is a closed loop: generate a candidate, test it against reality, measure the result, and decide what survives.
+
+For Cortex, the candidate is a neuroscience hypothesis. Reality is a brain simulation, EEG analysis, literature meta-analysis, or generated stimulus experiment. That makes neuroscience legible to agents as an optimization problem.
 
 1. Turn a question into falsifiable neuroscience hypotheses.
 2. Generate controlled stimuli for the experiment.
@@ -22,6 +32,13 @@ Most research agents can search papers and write summaries. Cortex adds a brain-
 4. Cross-check against literature and meta-analysis.
 5. Keep, refine, or discard each hypothesis.
 6. Produce a structured research report with limitations.
+
+## What This Unlocks
+
+- **Replication screening:** Before spending scanner time, Cortex can extract a claim from the literature and test whether it is computationally plausible across simulated brain responses.
+- **BCI stimulus optimization:** Cortex can search images, audio, text, and timing parameters for stimuli that produce distinctive neural patterns.
+- **Computational validation:** Instead of only summarizing papers, Cortex compares claims against brain tools and flags convergence, contradictions, and weak evidence.
+- **Autonomous stimulus search:** Generative AI creates candidate stimuli, TRIBE v2 predicts cortical responses, and the agent keeps the stimuli that best test the hypothesis.
 
 ## Main Features
 
