@@ -2,8 +2,9 @@ import { useState } from 'react'
 import './App.css'
 import { ResearchView } from './components/ResearchView'
 import { ToolExplorer } from './components/ToolExplorer'
+import { ExploreView } from './components/ExploreView'
 
-type Tab = 'research' | 'tools'
+type Tab = 'research' | 'explore' | 'tools'
 
 function App() {
   const [tab, setTab] = useState<Tab>('research')
@@ -20,7 +21,10 @@ function App() {
         </div>
         <nav className="tabs">
           <button className={tab === 'research' ? 'active' : ''} onClick={() => setTab('research')}>
-            Research Agent
+            Hypothesis Test
+          </button>
+          <button className={tab === 'explore' ? 'active' : ''} onClick={() => setTab('explore')}>
+            Stimulus Exploration
           </button>
           <button className={tab === 'tools' ? 'active' : ''} onClick={() => setTab('tools')}>
             Brain Tools
@@ -32,7 +36,9 @@ function App() {
         </div>
       </header>
       <main className="main">
-        {tab === 'research' ? <ResearchView /> : <ToolExplorer />}
+        {tab === 'research' && <ResearchView />}
+        {tab === 'explore' && <ExploreView />}
+        {tab === 'tools' && <ToolExplorer />}
       </main>
     </div>
   )

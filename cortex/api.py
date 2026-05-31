@@ -109,6 +109,22 @@ async def research_stream(question: str = Query(...)):
     return EventSourceResponse(event_generator())
 
 
+@app.get("/api/explore")
+async def explore_stream(question: str = Query(...)):
+    """Stream the generative stimulus-ranking loop: agent designs controlled visual
+    categories, generates images, runs TRIBE v2, ranks by neural engagement."""
+    from cortex.research_loop import run_generated_ranking
+
+    async def event_generator():
+        try:
+            async for event in run_generated_ranking(question):
+                yield _sse(event.get("kind", "event"), event)
+        except Exception as e:
+            yield _sse("error", {"message": str(e)})
+
+    return EventSourceResponse(event_generator())
+
+
 @app.get("/api/health")
 async def health():
     return {"status": "ok", "service": "cortex-api", "version": "0.2.0"}

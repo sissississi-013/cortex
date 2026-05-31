@@ -125,6 +125,49 @@ def read_stimulus_bytes(filepath: str) -> bytes:
     return Path(filepath).read_bytes()
 
 
+def generate_image_clip(description: str, seconds: int = 3) -> dict[str, Any]:
+    """Fast controlled-stimulus generation: gpt-image-1 image -> short video clip.
+
+    Skips Sora entirely (too slow). Produces a real mp4 (static frames) that TRIBE v2
+    can ingest, plus the still image for display. Returns local paths + raw video bytes.
+    """
+    client = _client()
+    stimulus_id = f"gen_{uuid.uuid4().hex[:8]}"
+    img_path = STIMULI_DIR / f"{stimulus_id}.png"
+    vid_path = STIMULI_DIR / f"{stimulus_id}.mp4"
+
+    try:
+        img = client.images.generate(
+            model="gpt-image-1",
+            prompt=(f"Photorealistic, centered visual stimulus for a neuroscience experiment: "
+                    f"{description}. Single clear subject, neutral background, no text, no watermark."),
+            n=1,
+            size="1024x1024",
+        )
+        b64 = img.data[0].b64_json
+        if not b64:
+            return {"stimulus_id": stimulus_id, "type": "image_clip", "description": description,
+                    "generated": False, "error": "no image data"}
+        img_path.write_bytes(base64.b64decode(b64))
+
+        import imageio.v3 as iio
+        import numpy as np
+        frame = iio.imread(img_path)
+        fps = 8
+        frames = np.stack([frame] * (seconds * fps))
+        iio.imwrite(vid_path, frames, fps=fps, codec="libx264")
+
+        return {
+            "stimulus_id": stimulus_id, "type": "image_clip", "description": description,
+            "image_url": f"/stimuli/{img_path.name}", "url": f"/stimuli/{vid_path.name}",
+            "filepath": str(vid_path), "video_bytes": vid_path.read_bytes(),
+            "generated": True, "method": "gpt-image-1 + ffmpeg",
+        }
+    except Exception as e:
+        return {"stimulus_id": stimulus_id, "type": "image_clip", "description": description,
+                "generated": False, "error": str(e)}
+
+
 # ---------------------------------------------------------------------------
 # Image / audio / text (secondary modalities)
 # ---------------------------------------------------------------------------

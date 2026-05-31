@@ -25,9 +25,12 @@ from typing import Any, AsyncGenerator
 from dotenv import load_dotenv
 from openai import OpenAI
 
+import uuid
+from contextlib import contextmanager
 from pathlib import Path
 
-from cortex.stats import two_sample_test, check_convergence
+from cortex.stats import two_sample_test
+from cortex.signals import check_overinterpretation_prose, check_low_power_stats
 
 load_dotenv()
 
@@ -45,6 +48,13 @@ class TribeUnavailable(Exception):
 
 def _client() -> OpenAI:
     return OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+
+# ---------------------------------------------------------------------------
+# Workshop tracing — full internal trajectory via direct OTLP (no API key)
+# ---------------------------------------------------------------------------
+
+from cortex.workshop_trace import WorkshopTrace  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -206,6 +216,32 @@ def _refine_prompts(hypothesis: str, focal_roi: str, name_a: str, name_b: str,
     return json.loads(r.choices[0].message.content or "{}")
 
 
+def _interpret_result(hypothesis: str, focal_roi: str, name_a: str, name_b: str, stats: dict) -> str:
+    r = _client().chat.completions.create(
+        model=MODEL,
+        messages=[
+            {"role": "system", "content": "You are a neuroscientist. In ONE natural sentence, "
+             "interpret this single experiment's result based on the statistics provided."},
+            {"role": "user", "content": json.dumps({"hypothesis": hypothesis, "focal_roi": focal_roi,
+                "condition_a": name_a, "condition_b": name_b, "statistics": stats})},
+        ],
+    )
+    return (r.choices[0].message.content or "").strip()
+
+
+def _correct_interpretation(interpretation: str, stats: dict) -> str:
+    r = _client().chat.completions.create(
+        model=MODEL,
+        messages=[
+            {"role": "system", "content": "Rewrite this interpretation in ONE sentence so it does NOT "
+             "overstate the evidence. Given the p-value and sample size, qualify appropriately "
+             "(e.g. 'suggestive, not significant') and report the effect size honestly."},
+            {"role": "user", "content": json.dumps({"interpretation": interpretation, "statistics": stats})},
+        ],
+    )
+    return (r.choices[0].message.content or "").strip()
+
+
 def _synthesize_report(question: str, experiments: list[dict]) -> str:
     r = _client().chat.completions.create(
         model=MODEL,
@@ -225,12 +261,195 @@ def _synthesize_report(question: str, experiments: list[dict]) -> str:
 # The loop
 # ---------------------------------------------------------------------------
 
+def _get_infer_bytes_fn():
+    """Modal run_tribe_inference (takes raw video bytes). Raises TribeUnavailable if unreachable."""
+    try:
+        import modal
+    except ImportError as e:
+        raise TribeUnavailable("modal package not installed") from e
+    try:
+        return modal.Function.from_name("cortex-tribe", "run_tribe_inference")
+    except Exception as e:
+        raise TribeUnavailable(f"Modal app 'cortex-tribe' not reachable ({type(e).__name__}: {e})") from e
+
+
+RANKING_DESIGN_SYSTEM = """You are Cortex, designing a CONTROLLED visual-stimulus ranking experiment \
+to discover which kind of visual content most strongly engages the human brain.
+
+IMPORTANT: TRIBE v2 predicts the CORTICAL SURFACE only. You may ONLY choose a target ROI from this \
+measurable cortical list (subcortical regions like amygdala/hippocampus are NOT available):
+  FFA (faces), PPA (scenes/places), V1, V2 (low-level vision), STG, A1, STS, MTG (auditory/temporal), \
+  IFG (language), AG, SMG, dlPFC, ACC, PCC, M1, precuneus, mPFC, OFC, insula.
+For threat/fear/emotion questions, use a cortical proxy: insula, ACC, OFC, or mPFC (the cortical \
+salience/affective network) — never amygdala.
+
+Using neuroscience domain knowledge:
+1. Choose a TARGET ROI FROM THE LIST ABOVE whose engagement is the primary ranking metric \
+   (e.g. FFA for faces, PPA for scenes, V1 for low-level features, insula/ACC for threat salience).
+2. Design 3-5 controlled visual CATEGORIES spanning a meaningful range (e.g. simple patterns, isolated \
+   objects, faces, social scenes, threatening/fearful scenes). Keep them comparable on low-level features \
+   where possible so the contrast is about content, not luminance/clutter.
+3. For each category, write 2 concrete IMAGE generation prompts (photorealistic, centered, single clear \
+   subject/scene, no text).
+4. Give a one-line neuroscience rationale per category (cite known findings from domain knowledge).
+
+Respond ONLY as JSON:
+{
+  "target_roi": "insula",
+  "target_roi_rationale": "Anterior insula is the cortical hub for threat salience/interoception (Craig).",
+  "categories": [
+    {"name": "neutral patterns", "rationale": "Low salience baseline; minimal affective drive.",
+     "image_prompts": ["a plain grid of gray squares", "a simple blue geometric pattern"]},
+    {"name": "threatening scenes", "rationale": "High threat salience drives anterior insula/ACC (Ohman).",
+     "image_prompts": ["a menacing snarling predator lunging", "a dark threatening figure in an alley"]}
+  ]
+}"""
+
+
+def _design_ranking(question: str) -> dict:
+    r = _client().chat.completions.create(
+        model=MODEL, response_format={"type": "json_object"},
+        messages=[{"role": "system", "content": RANKING_DESIGN_SYSTEM},
+                  {"role": "user", "content": f"Research question: {question}"}],
+    )
+    return json.loads(r.choices[0].message.content or "{}")
+
+
+def _global_engagement(roi_activation: dict) -> float:
+    vals = [v.get("mean", 0.0) for v in roi_activation.values()]
+    return float(sum(vals) / len(vals)) if vals else 0.0
+
+
+async def run_generated_ranking(question: str) -> AsyncGenerator[dict, None]:
+    """Generative stimulus exploration: agent designs controlled visual categories, generates
+    real images, runs TRIBE v2, and ranks categories by target-ROI + whole-cortex engagement."""
+    from cortex.tools.stimulus_gen import generate_image_clip
+    import base64 as _b64
+
+    trace = WorkshopTrace("cortex_stimulus_ranking", question)
+    yield {"kind": "workshop", "url": "http://localhost:5899"}
+
+    yield {"kind": "phase", "phase": "design", "message": "Designing controlled stimulus categories..."}
+    try:
+        with trace.span("design_ranking"):
+            design = await asyncio.to_thread(_design_ranking, question)
+    except Exception as e:
+        yield {"kind": "error", "message": f"Design failed: {e}"}
+        return
+
+    target_roi = design.get("target_roi", "V1")
+    categories = design.get("categories", [])
+    if not categories:
+        yield {"kind": "error", "message": "No categories could be designed."}
+        return
+
+    yield {"kind": "ranking_designed", "target_roi": target_roi,
+           "target_roi_rationale": design.get("target_roi_rationale"),
+           "categories": [{"name": c.get("name"), "rationale": c.get("rationale")} for c in categories]}
+
+    try:
+        infer_fn = _get_infer_bytes_fn()
+    except TribeUnavailable as e:
+        yield {"kind": "tribe_unavailable", "message": str(e)}
+        return
+
+    cat_results = []
+
+    for ci, cat in enumerate(categories):
+        name = cat.get("name", f"cat{ci}")
+        prompts = list(cat.get("image_prompts", []))[:2]
+        yield {"kind": "category_start", "index": ci, "name": name, "rationale": cat.get("rationale")}
+
+        # Generate images -> clips (in parallel) for this category.
+        for p in prompts:
+            yield {"kind": "stimulus_generating", "category": name, "prompt": p}
+        with trace.span(f"generate_images: {name}", category=name, n=len(prompts)):
+            gens = await asyncio.gather(*[asyncio.to_thread(generate_image_clip, p) for p in prompts])
+        gens = [g for g in gens if g.get("generated")]
+        for g in gens:
+            yield {"kind": "stimulus_ready", "category": name, "image_url": g.get("image_url"),
+                   "url": g.get("url"), "stimulus_id": g.get("stimulus_id")}
+
+        if not gens:
+            yield {"kind": "category_result", "index": ci, "name": name, "n": 0,
+                   "target_mean": None, "global_mean": None}
+            continue
+
+        # Run TRIBE v2 on the generated clips in parallel.
+        bytes_list = [g["video_bytes"] for g in gens]
+        ids_list = [g["stimulus_id"] for g in gens]
+        roi_list = [[target_roi]] * len(gens)
+        with trace.span(f"tribe_v2_inference: {name}", category=name, n=len(gens), target_roi=target_roi):
+            results = await asyncio.to_thread(lambda: list(infer_fn.map(bytes_list, ids_list, roi_list)))
+
+        targets, globals_ = [], []
+        for g, res in zip(gens, results):
+            roi_act = res.get("roi_activation", {})
+            tval = roi_act.get(target_roi, {}).get("mean")
+            if tval is None:
+                tval = (res.get("top_rois") or [{}])[0].get("mean", 0.0)
+            gval = _global_engagement(roi_act)
+            targets.append(float(tval)); globals_.append(float(gval))
+            surf_url = _save_b64(res.get("surface_png_b64"), f"{g['stimulus_id']}_surf.png")
+            yield {"kind": "stimulus_result", "category": name, "stimulus_id": g["stimulus_id"],
+                   "image_url": g.get("image_url"), "url": g.get("url"), "surface_url": surf_url,
+                   "target_roi": target_roi, "target_value": float(tval),
+                   "global_value": float(gval), "peak_roi": res.get("peak_roi")}
+
+        tmean = sum(targets) / len(targets)
+        gmean = sum(globals_) / len(globals_)
+        cat_results.append({"name": name, "rationale": cat.get("rationale"),
+                            "target_mean": tmean, "global_mean": gmean, "n": len(targets)})
+        yield {"kind": "category_result", "index": ci, "name": name,
+               "target_mean": tmean, "global_mean": gmean, "n": len(targets)}
+
+    # Rank.
+    ranked = sorted(cat_results, key=lambda c: c["target_mean"], reverse=True)
+    for rank, c in enumerate(ranked):
+        c["rank"] = rank + 1
+    yield {"kind": "ranking", "target_roi": target_roi, "ordered": ranked}
+
+    # Record the ranking outcome as signals so it shows on the Workshop timeline.
+    for c in ranked:
+        trace.signal(f"rank #{c['rank']}: {c['name']}", sentiment="POSITIVE" if c["rank"] == 1 else "",
+                     reason=f"{target_roi}={c['target_mean']:.3f}, global={c['global_mean']:.3f}")
+
+    yield {"kind": "phase", "phase": "synthesize", "message": "Writing ranked findings..."}
+    with trace.span("synthesize_report"):
+        report = await asyncio.to_thread(_synthesize_ranking_report, question, target_roi,
+                                         design.get("target_roi_rationale"), ranked)
+    yield {"kind": "report", "content": report}
+    trace.finish(report)
+    yield {"kind": "phase", "phase": "complete", "message": "Exploration complete"}
+
+
+def _synthesize_ranking_report(question: str, target_roi: str, roi_rationale: str, ranked: list) -> str:
+    r = _client().chat.completions.create(
+        model=MODEL,
+        messages=[
+            {"role": "system", "content": "You are Cortex. Write a concise markdown report for a "
+             "visual-stimulus RANKING experiment, grounded ONLY in the provided measured data. "
+             "Include: Research Question, Method (controlled generated stimuli + TRIBE v2, target ROI), "
+             "a markdown TABLE ranking categories by target-ROI engagement and whole-cortex engagement, "
+             "Key Findings, and Limitations (static generated images; model-predicted not empirical). "
+             "Do not invent numbers."},
+            {"role": "user", "content": json.dumps({"question": question, "target_roi": target_roi,
+                "target_roi_rationale": roi_rationale, "ranked_categories": ranked})},
+        ],
+    )
+    return r.choices[0].message.content or ""
+
+
 async def run_research(question: str) -> AsyncGenerator[dict, None]:
     """Run the full autonomous research loop, yielding structured events."""
+    trace = WorkshopTrace("cortex_research", question)
+    yield {"kind": "workshop", "url": "http://localhost:5899"}
+
     yield {"kind": "phase", "phase": "design", "message": "Designing experiments..."}
 
     try:
-        experiments = await asyncio.to_thread(_design_experiments, question)
+        with trace.span("design_experiments"):
+            experiments = await asyncio.to_thread(_design_experiments, question)
     except Exception as e:
         yield {"kind": "error", "message": f"Experiment design failed: {e}"}
         return
@@ -275,8 +494,10 @@ async def run_research(question: str) -> AsyncGenerator[dict, None]:
                    "n_per_condition": N_PER_CONDITION, "prompts_a": prompts_a, "prompts_b": prompts_b}
 
             try:
-                batch = await _run_batch(prompts_a, prompts_b, name_a, name_b, focal_roi,
-                                         N_PER_CONDITION, used_clip_ids, tag=f"e{exp_idx}_i{iteration}")
+                with trace.span(f"tribe_v2_batch_inference [exp{exp_idx} it{iteration}]",
+                                focal_roi=focal_roi, n_per_condition=N_PER_CONDITION):
+                    batch = await _run_batch(prompts_a, prompts_b, name_a, name_b, focal_roi,
+                                             N_PER_CONDITION, used_clip_ids, tag=f"e{exp_idx}_i{iteration}")
             except TribeUnavailable as e:
                 yield {"kind": "tribe_unavailable", "message": str(e)}
                 return
@@ -327,9 +548,35 @@ async def run_research(question: str) -> AsyncGenerator[dict, None]:
                 status = "refined"
                 stop_reason = "not yet significant — refining stimuli to reduce confounds"
 
-            interp = test_result.get("note") or (
-                f"{name_a} mean={test_result.get('mean_a')}, {name_b} mean={test_result.get('mean_b')}, "
-                f"p={p}, d={d}")
+            # Generate a natural-language interpretation, then self-monitor it for over-claiming.
+            with trace.span("interpret_result", iteration=iteration):
+                interp = await asyncio.to_thread(_interpret_result, hypothesis, focal_roi,
+                                                 name_a, name_b, test_result)
+
+            # --- Self-monitoring signals (Workshop spans + mirrored to UI) ---
+            low_power = check_low_power_stats(test_result)
+            if low_power["fired"]:
+                trace.signal(low_power["name"], sentiment=low_power.get("sentiment", ""),
+                             reason=low_power.get("reason", ""))
+                yield {"kind": "signal", "experiment": exp_idx, "iteration": iteration, **low_power}
+
+            overinterp = check_overinterpretation_prose(interp, test_result)
+            if overinterp["fired"]:
+                trace.signal(overinterp["name"], sentiment=overinterp.get("sentiment", ""),
+                             reason=overinterp.get("reason", ""))
+                yield {"kind": "signal", "experiment": exp_idx, "iteration": iteration, **overinterp}
+                # Self-heal: rewrite the interpretation honestly.
+                with trace.span("self_correct_interpretation"):
+                    corrected = await asyncio.to_thread(_correct_interpretation, interp, test_result)
+                trace.signal("self_correction", sentiment="POSITIVE",
+                             reason="Rewrote over-stated interpretation to match the evidence.",
+                             before=interp, after=corrected)
+                yield {"kind": "signal", "experiment": exp_idx, "iteration": iteration,
+                       "name": "self_correction", "sentiment": "POSITIVE",
+                       "reason": "Caught over-interpretation and corrected it.",
+                       "before": interp, "after": corrected}
+                interp = corrected
+
             yield {"kind": "decision", "experiment": exp_idx, "iteration": iteration,
                    "status": status, "stop_reason": stop_reason, "interpretation": interp}
 
@@ -344,6 +591,11 @@ async def run_research(question: str) -> AsyncGenerator[dict, None]:
                 prompts_a = refine["prompts_a"]
             if refine.get("prompts_b"):
                 prompts_b = refine["prompts_b"]
+            if refine.get("diagnosis"):
+                trace.signal("confound_detected", sentiment="POSITIVE", reason=refine.get("diagnosis"))
+                yield {"kind": "signal", "experiment": exp_idx, "iteration": iteration,
+                       "name": "confound_detected", "sentiment": "POSITIVE",
+                       "reason": refine.get("diagnosis")}
             yield {"kind": "refinement", "experiment": exp_idx, "iteration": iteration,
                    "diagnosis": refine.get("diagnosis"), "prompts_a": prompts_a, "prompts_b": prompts_b}
 
@@ -358,10 +610,17 @@ async def run_research(question: str) -> AsyncGenerator[dict, None]:
             "final_statistics": test_result,
             "final_status": status,
         })
+        # Final outcome signal for this experiment.
+        trace.signal(f"hypothesis_{status}",
+                     sentiment="POSITIVE" if status == "supported" else "NEGATIVE",
+                     reason=f"{hypothesis} → {status}")
         yield {"kind": "experiment_complete", "index": exp_idx, "status": status,
                "result": completed_results[-1]}
 
     yield {"kind": "phase", "phase": "synthesize", "message": "Synthesizing report from real data..."}
-    report = await asyncio.to_thread(_synthesize_report, question, completed_results)
+    with trace.span("synthesize_report"):
+        report = await asyncio.to_thread(_synthesize_report, question, completed_results)
     yield {"kind": "report", "content": report}
+    trace.finish(report)
+
     yield {"kind": "phase", "phase": "complete", "message": "Research complete"}

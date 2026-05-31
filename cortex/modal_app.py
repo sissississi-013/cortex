@@ -105,11 +105,15 @@ def _load_tribe_model():
     from tribev2 import TribeModel
 
     os.makedirs(WEIGHTS_DIR, exist_ok=True)
+    # Per-container LOCAL feature cache — must NOT be the shared volume, or parallel
+    # .map() workers corrupt each other's cached video features (shape-mismatch errors).
+    local_cache = "/root/tribe_feature_cache"
+    os.makedirs(local_cache, exist_ok=True)
     local_dir = snapshot_download(repo_id="facebook/tribev2", cache_dir=WEIGHTS_DIR)
     _MODEL = TribeModel.from_pretrained(
         checkpoint_dir=local_dir,
         checkpoint_name="best.ckpt",
-        cache_folder=WEIGHTS_DIR,
+        cache_folder=local_cache,
         device="auto",
     )
     return _MODEL
@@ -218,10 +222,21 @@ def _infer_video_file_light(model, video_path: str, roi_focus: list | None) -> d
     timeout=900, scaledown_window=300, max_containers=12,
 )
 def infer_clip_path(clip_path: str, roi_focus: list | None = None) -> dict:
-    """Run TRIBE v2 on a clip already present in the bank volume. Parallel-friendly."""
+    """Run TRIBE v2 on a clip already present in the bank volume. Parallel-friendly.
+
+    Also returns the clip's video bytes (this container can read the file, since it
+    just ran inference on it) so the frontend can display the exact stimulus.
+    """
+    import base64
     model = _load_tribe_model()
     out = _infer_video_file_light(model, clip_path, roi_focus)
     out["clip_path"] = clip_path
+    try:
+        with open(clip_path, "rb") as f:
+            out["video_b64"] = base64.b64encode(f.read()).decode()
+    except Exception as e:
+        out["video_b64"] = None
+        out["video_read_error"] = f"{type(e).__name__}: {e}"
     return out
 
 
@@ -298,14 +313,12 @@ def run_experiment_batch(
                 val = (sorted(r["roi_activation"].items(), key=lambda kv: kv[1]["mean"], reverse=True) or [("", {"mean": 0})])[0][1]["mean"]
             vals.append(float(val))
             vmaps.append(np.asarray(r["vertex_mean"], dtype=float))
-            try:
-                with open(c["path"], "rb") as f:
-                    vb = base64.b64encode(f.read()).decode()
-            except Exception:
-                vb = None
             details.append({"clip_id": c["clip_id"], "caption": c["caption"],
                             "similarity": c["similarity"], "focal_value": float(val),
-                            "peak_roi": r["peak_roi"], "video_b64": vb})
+                            "peak_roi": r["peak_roi"], "video_b64": r.get("video_b64"),
+                            "video_read_error": r.get("video_read_error"),
+                            "debug_path": r.get("clip_path"),
+                            "has_vb_key": "video_b64" in r})
         return vals, vmaps, details
 
     vals_a, vmaps_a, details_a = collect(clips_a)

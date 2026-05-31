@@ -34,12 +34,22 @@ interface Stimulus {
   similarity?: number
 }
 
+interface Signal {
+  name: string
+  sentiment?: string
+  reason?: string
+  recommendation?: string
+  before?: string
+  after?: string
+}
+
 interface IterRecord {
   iteration: number
   stats?: any
   decision?: any
   maps?: { group_a_url?: string; group_b_url?: string; contrast_url?: string; group_a_label?: string; group_b_label?: string; roi_meta?: any }
   refinement?: { diagnosis?: string; prompts_a?: string[]; prompts_b?: string[] }
+  signals?: Signal[]
 }
 
 interface Experiment {
@@ -140,6 +150,14 @@ export function ResearchView() {
           ...e, iterations: e.iterations.map(i => i.iteration === d.iteration ? { ...i, refinement: d } : i),
         }))
         addLog(`  Refine: ${d.diagnosis?.slice(0, 70)}`, 'decision'); break
+      case 'signal':
+        updateExp(d.experiment, e => ({
+          ...e, iterations: e.iterations.map(i => i.iteration === d.iteration
+            ? { ...i, signals: [...(i.signals || []), d as Signal] } : i),
+        }))
+        addLog(`  [signal] ${d.name}: ${d.reason?.slice(0, 60)}`, d.sentiment === 'POSITIVE' ? 'stats' : 'error'); break
+      case 'workshop':
+        addLog(`  Tracing to Raindrop Workshop → ${d.url}`, 'tribe'); break
       case 'experiment_complete':
         updateExp(d.index, e => ({ ...e, complete: true })); addLog(`Experiment ${d.index + 1} complete`, 'phase'); break
       case 'tribe_unavailable':
@@ -331,10 +349,30 @@ function ExperimentCard({ exp }: { exp: Experiment }) {
             </div>
 
             {it.stats && it.stats.p_value != null && <StatsStrip stats={it.stats} a={condA} b={condB} />}
+
+            {/* Self-monitoring signals (also recorded in Raindrop Workshop) */}
+            {it.signals && it.signals.length > 0 && (
+              <div className="signals-list">
+                {it.signals.map((s, i) => (
+                  <div key={i} className={`signal-row ${s.sentiment === 'POSITIVE' ? 'pos' : 'neg'}`}>
+                    <span className="signal-name">{s.name}</span>
+                    <span className="signal-reason">{s.reason}</span>
+                    {s.before && s.after && (
+                      <div className="signal-correction">
+                        <span className="sc-before">“{s.before}”</span>
+                        <span className="sc-arrow">→</span>
+                        <span className="sc-after">“{s.after}”</span>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+
             {it.decision && (
               <div className="decision-box">
                 <span className={`decision-tag ${it.decision.status}`}>{it.decision.status}</span>
-                <span className="decision-text">{it.decision.stop_reason}</span>
+                <span className="decision-text">{it.decision.interpretation || it.decision.stop_reason}</span>
               </div>
             )}
             {it.refinement?.diagnosis && (

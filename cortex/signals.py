@@ -147,6 +147,39 @@ def check_overinterpretation(
     return {"signal": "result_overinterpretation", "fired": False}
 
 
+OVERCLAIM_TERMS = [
+    "significant", "significantly", "proves", "proven", "clearly shows", "demonstrates",
+    "confirms", "strong evidence", "definitively", "established", "conclusive", "robustly",
+]
+
+
+def check_overinterpretation_prose(interpretation: str, stats: dict[str, Any]) -> dict[str, Any]:
+    """Catch the agent over-claiming: strong language while the stats are weak/non-significant."""
+    text = (interpretation or "").lower()
+    p = stats.get("p_value")
+    overclaims = [t for t in OVERCLAIM_TERMS if t in text]
+    weak = (p is None) or (p >= 0.05)
+    if overclaims and weak:
+        return {
+            "fired": True, "name": "result_overinterpretation", "sentiment": "NEGATIVE",
+            "reason": f"Interpretation uses strong language {overclaims} but p={p} (not significant)",
+            "recommendation": "Qualify as suggestive; report effect size alongside p-value.",
+        }
+    return {"fired": False, "name": "result_overinterpretation"}
+
+
+def check_low_power_stats(stats: dict[str, Any], min_n: int = 4) -> dict[str, Any]:
+    """Flag a decision being drawn on too few data points."""
+    na, nb = stats.get("n_a", 0), stats.get("n_b", 0)
+    if na < min_n or nb < min_n:
+        return {
+            "fired": True, "name": "low_statistical_power", "sentiment": "NEGATIVE",
+            "reason": f"n={na}/{nb} below {min_n} per condition — underpowered.",
+            "recommendation": "Collect more clips before drawing conclusions.",
+        }
+    return {"fired": False, "name": "low_statistical_power"}
+
+
 def check_loop_stall(hypothesis_id: str, iteration: int, max_iterations: int = 3) -> dict[str, Any]:
     """Check if the hypothesis loop is stalled."""
     if iteration >= max_iterations:
