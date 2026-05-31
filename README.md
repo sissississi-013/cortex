@@ -120,6 +120,24 @@ The dashboard shows the full workflow: experiment design, generated stimuli, cor
 
 <img width="1928" height="3134" alt="image" src="https://github.com/user-attachments/assets/43c411f4-aa4a-4a37-af29-99d7ed46d9e1" />
 
+## Generative Stimulus Exploration
+
+The **Stimulus Exploration** mode answers a different kind of question: *which visual content most strongly engages the brain?* Instead of testing a single A-vs-B hypothesis, Cortex designs and runs a controlled, generative experiment end to end:
+
+1. **Designs a controlled experiment.** From your question, the agent picks a measurable **target ROI** and a set of controlled visual categories (e.g. patterns, objects, faces, social scenes, threatening scenes), each with a neuroscience rationale. Because TRIBE v2 predicts the cortical surface only, the agent is constrained to measurable cortical regions — for threat/fear it uses cortical proxies like the insula or ACC rather than the (subcortical, unmeasurable) amygdala.
+2. **Generates its own stimuli.** For each category it generates real images with OpenAI image generation and wraps them into short clips TRIBE v2 can ingest.
+3. **Runs TRIBE v2 in parallel.** Every generated clip is scored on Modal GPUs (parallel fan-out), producing real `fsaverage5` cortical activation.
+4. **Ranks by engagement.** Categories are ranked by **target-ROI activation** and by **whole-cortex engagement** (mean across all regions), shown as live ranking bars with per-category cortical surface maps.
+5. **Reports.** A markdown findings report with a ranked results table and honest limitations (static generated images, model-predicted rather than empirical).
+
+Run it from the **Stimulus Exploration** tab, or via the API:
+
+```bash
+curl -N "http://localhost:8000/api/explore?question=Which%20visual%20categories%20drive%20the%20strongest%20FFA%20response%3F"
+```
+
+This is generative-AI-driven stimulus search: the agent invents candidate stimuli, measures the predicted neural response, and tells you what the brain cares about most.
+
 ## MCP Tools
 
 | Tool | Purpose | Backend |
@@ -152,33 +170,52 @@ Then ask your agent to use the Cortex tools for neuroscience questions, experime
 
 ## Raindrop Workshop
 
-Cortex includes custom signals for monitoring research quality:
+A research agent is a black box: the part that matters is everything it does *after* you send the question — the hypotheses it forms, the tools it calls, the errors it catches, and how it corrects course. Cortex streams that entire internal trajectory into **Raindrop Workshop** as a nested, navigable trace.
 
-- `hypothesis_unfalsifiable` catches vague or untestable hypotheses.
-- `tool_selection_mismatch` detects when the wrong brain tool is selected.
-- `result_overinterpretation` flags claims that go beyond the evidence.
-- `hypothesis_loop_stall` detects repeated refinement without progress.
+**No API key required.** Workshop ingests raw OTLP at `http://localhost:5899/v1/traces`, so Cortex sends OpenTelemetry spans directly to your local Workshop — bypassing the cloud key gate. Just have Workshop running; Cortex auto-detects it.
 
-Run with Raindrop Workshop:
+A single research run appears as a span tree like:
 
-```bash
-export RAINDROP_WRITE_KEY=rk_...
-export RAINDROP_LOCAL_DEBUGGER=http://localhost:5899/v1/
-python -m cortex demo
+```text
+cortex_research
+├─ design_experiments              # forming falsifiable hypotheses
+├─ tribe_v2_batch_inference        # the real GPU brain simulation (per iteration)
+├─ interpret_result                # reading its own results
+├─ ⚠ signal: low_statistical_power      # caught: too few data points
+├─ ⚠ signal: result_overinterpretation  # caught: over-claiming vs the stats
+├─ ✓ signal: self_correction            # rewrote the claim to match evidence
+├─ ✓ signal: confound_detected          # spotted a bad stimulus, re-aligned
+└─ synthesize_report
 ```
 
-Open Raindrop Workshop to inspect the hypothesis-test-revise trace.
+The self-monitoring signals make the agent's reliability legible:
+
+- `result_overinterpretation` — flags claims that go beyond the evidence (e.g. calling p = 0.14 "significant"), then triggers a self-correction.
+- `low_statistical_power` — flags conclusions drawn on too little data.
+- `confound_detected` — spots stimuli that undermine the contrast and refines them.
+- `self_correction` — records the agent fixing its own over-statement.
+
+Everything works locally with no key. If you do have a Raindrop write key, set it for full cloud tracing plus auto-instrumented LLM spans:
+
+```bash
+export RAINDROP_WRITE_KEY=rk_...   # optional — local Workshop tracing works without it
+```
+
+Open Workshop at `http://localhost:5899` and inspect any run to watch the agent reason, catch its own mistakes, and get back on track.
 
 ## Project Structure
 
 ```text
 cortex/
   cortex/
-    api.py                 # FastAPI server for the web demo
+    api.py                 # FastAPI server: /api/research + /api/explore (SSE)
     mcp_server.py          # FastMCP brain tools server
     agent.py               # OpenAI Agents SDK orchestrator
-    research_loop.py       # Streaming hypothesis-test-revise loop
-    modal_app.py           # Modal GPU functions for TRIBE v2
+    research_loop.py       # Hypothesis-test-revise loop + generative ranking mode
+    modal_app.py           # Modal GPU functions for TRIBE v2 (parallel inference, surface maps)
+    stats.py               # t-test, Cohen's d, convergence / stop condition
+    signals.py             # Self-monitoring signal checks
+    workshop_trace.py      # Direct OTLP tracing into Raindrop Workshop (no key)
     tools/
       stimulus_gen.py      # Image, audio, text, and paired stimulus generation
       tribe_fmri.py        # fMRI prediction interface
