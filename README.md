@@ -124,7 +124,7 @@ The dashboard shows the full workflow: experiment design, generated stimuli, cor
 
 The **Stimulus Exploration** mode answers a different kind of question: *which visual content most strongly engages the brain?* Instead of testing a single A-vs-B hypothesis, Cortex designs and runs a controlled, generative experiment end to end:
 
-<img width="2932" height="10238" alt="image" src="https://github.com/user-attachments/assets/42db0748-07fa-4872-9b6e-160ceed58f08" />
+<img width="2932" height="3574" alt="image" src="https://github.com/user-attachments/assets/61183696-e15b-48f1-9755-02eb91cc7fb0" />
 
 1. **Designs a controlled experiment.** From your question, the agent picks a measurable **target ROI** and a set of controlled visual categories (e.g. patterns, objects, faces, social scenes, threatening scenes), each with a neuroscience rationale. Because TRIBE v2 predicts the cortical surface only, the agent is constrained to measurable cortical regions — for threat/fear it uses cortical proxies like the insula or ACC rather than the (subcortical, unmeasurable) amygdala.
 2. **Generates its own stimuli.** For each category it generates real images with OpenAI image generation and wraps them into short clips TRIBE v2 can ingest.
